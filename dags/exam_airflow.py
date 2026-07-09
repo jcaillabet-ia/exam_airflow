@@ -1,8 +1,9 @@
 from airflow import DAG
-from airflow.decorators import dag, task
+from airflow.decorators import dag, task, task_group
 from airflow.models import Variable
 from airflow.utils.dates import days_ago
 from airflow.operators.python import get_current_context
+from airflow.utils.task_group import TaskGroup
 
 from sklearn.model_selection import cross_val_score
 from sklearn.linear_model import LinearRegression
@@ -17,6 +18,9 @@ import os
 import requests
 import pandas as pd
 
+##
+# Méthodes
+##
 def prepare_data(path_to_data='/app/clean_data/fulldata.csv'):
     # reading data
     df = pd.read_csv(path_to_data)
@@ -106,6 +110,9 @@ def train_and_save_model(model, X, y, path_to_model='/app/model.pckl'):
     print(str(model), 'saved at ', path_to_model)
     dump(model, path_to_model)
 
+##
+# Taches et groupes de taches
+##
 @task
 def task1():
     cities = Variable.get(key="cities")
@@ -121,13 +128,20 @@ def task1():
     with open('/app/raw_files/' + date + '.json', 'w') as f:
         json.dump(cities_api, f)
 
-@task
-def task2():
-    transform_data_into_csv(20)
+@task_group(group_id='clean_group')
+def clean_group():
+    @task
+    def task2():
+        transform_data_into_csv(20)
 
-@task
-def task3():
-    transform_data_into_csv(filename='fulldata.csv')
+    @task
+    def task3():
+        transform_data_into_csv(filename='fulldata.csv')
+
+    t2 = task2()
+    t3 = task3()
+
+    return t3
 
 @task
 def task4_1(ti=None):
@@ -163,15 +177,15 @@ def task4_3(ti=None):
 def task5(ti=None):
     score_lr = ti.xcom_pull(
         key="score_lr",
-        task_ids='task4_1'
+        task_ids='models_group.task4_1'
     )
     score_dtr = ti.xcom_pull(
         key="score_dtr",
-        task_ids='task4_2'
+        task_ids='models_group.task4_2'
     )
     score_rfr = ti.xcom_pull(
         key="score_rfr",
-        task_ids='task4_3'
+        task_ids='models_group.task4_3'
     )   
     
     max_score = max(score_lr, score_dtr, score_rfr)
@@ -200,6 +214,9 @@ def task5(ti=None):
             '/app/clean_data/best_model.pickle'
         )
 
+##
+# Définition du DAG
+##
 @dag(
     dag_id='exam_airflow_v2',
     tags=['exam'],
@@ -209,15 +226,18 @@ def task5(ti=None):
 )
 def my_dag():
     t1 = task1()
-    t2 = task2()
-    t3 = task3()
-    t4_1 = task4_1()
-    t4_2 = task4_2()
-    t4_3 = task4_3()
+    
+    clean_group_task = clean_group()
+
+    with TaskGroup("models_group") as models_group:
+        t4_1 = task4_1()
+        t4_2 = task4_2()
+        t4_3 = task4_3()
+
     t5 = task5()
 
-    t1 >> [t2,t3]
-    t3 >> [t4_1, t4_2, t4_3]
-    [t4_1, t4_2, t4_3] >> t5
+    t1 >> clean_group_task
+    clean_group_task >> models_group
+    models_group >> t5
 
 my_dag = my_dag()
